@@ -1,6 +1,7 @@
 package com.finalized;
 
 import java.io.Serializable;
+import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class MyArrayBlockingQueue implements Serializable {
@@ -31,15 +32,15 @@ public class MyArrayBlockingQueue implements Serializable {
 	}
 
 	public void put(Integer e) {
-		if (!queueFull())
-			addToLast(e);
+		while(queueFull())
+			;
+		addToLast(e);
 	}
 
 	public Integer take() {
-		if (queueEmpty())
-			return null;
-		Integer polled = removeFromFront();
-		return polled;
+		while(queueEmpty())
+			;
+		return removeFromFront();
 	}
 
 	public boolean queueFull() {
@@ -52,5 +53,12 @@ public class MyArrayBlockingQueue implements Serializable {
 
 	public int size() {
 		return size.get();
+	}
+
+	@Override
+	public String toString() {
+		return "MyArrayBlockingQueue{" +
+				"queue=" + Arrays.toString(queue) +
+				'}';
 	}
 }

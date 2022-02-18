@@ -1,100 +1,89 @@
 package com.finalized;
 
-import java.io.*;
+import java.util.concurrent.Exchanger;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
 public class WrapperQueue {
-	private AtomicReference<MyArrayBlockingQueue> producerQueue;
-	private AtomicReference<MyArrayBlockingQueue> consumerQueue;
+	private final AtomicReference<MyArrayBlockingQueue> producerRef = new AtomicReference<>() ;
+	private final AtomicReference<MyArrayBlockingQueue> consumerRef = new AtomicReference<>() ;
 	private final ObjectStore fileQueue;
-	private final int Capacity;
-	private AtomicInteger filePointer = new AtomicInteger(0);
-	private Lock putLock = new ReentrantLock();
-	ExecutorService pool = Executors.newCachedThreadPool();
+
+	private final int capacity;
+
+	private final Lock producerReplaceLock = new ReentrantLock();
+	private final Lock consumerReplaceLock = new ReentrantLock();
+
+	private final ExecutorService pool = Executors.newCachedThreadPool();
+
+	private final Exchanger<MyArrayBlockingQueue> exchanger = new Exchanger<>();
 
 	public WrapperQueue(int capacity) {
 
-		producerQueue = new AtomicReference<MyArrayBlockingQueue>(new MyArrayBlockingQueue(capacity));
-		// Create some Extra Space for consumer to consume values from queue after
-		// reading occurs from file
-		consumerQueue = new AtomicReference<MyArrayBlockingQueue>(new MyArrayBlockingQueue(capacity));
+		producerRef.set(new MyArrayBlockingQueue(capacity));
+		consumerRef.set(new MyArrayBlockingQueue(capacity));
 		fileQueue = new ObjectStore();
-		this.Capacity = capacity;
+		this.capacity = capacity;
 
-		// Tries to keep the consumerQueue full at all times
 		Thread moveFromFileDaemon = new Thread(() -> {
-			while (true)
-				try {
-					moveFromFile();
-				} catch (IOException | ClassNotFoundException e) {
-					e.printStackTrace();
-				}
+			while (true) moveFromFile();
 		});
 		moveFromFileDaemon.setDaemon(true);
 		moveFromFileDaemon.start();
 	}
 
-	// 2.take values from the producer queue and place it in the file at a time.
-	private void moveToFile(MyArrayBlockingQueue producerCopy) throws IOException {
-
-		fileQueue.writeQueue(producerCopy);
+	private void moveToFile(MyArrayBlockingQueue queue) {
+		fileQueue.writeQueue(queue);
 	}
 
-	// 3.take values from file and put it in consumer queue and always make it full
-	// using service Threads
-	private void moveFromFile() throws ClassNotFoundException, IOException {
-		if (filePointer.get() > 0) {
-			MyArrayBlockingQueue obj = fileQueue.readQueue();
-			filePointer.getAndDecrement();
-			while (consumerQueue.get().size() > 0)
-				;
-			if (obj != null)
-				consumerQueue.set(obj);
-		}
-	}
-
-	// 1.Producer put values in the producer queue
-	public void put(Integer e) {
-		putLock.lock();
+	private void moveFromFile() {
+		MyArrayBlockingQueue nextConsumer = fileQueue.readQueue();
 		try {
-			MyArrayBlockingQueue obj = producerQueue.get();
-			if (obj.queueFull()) {
-
-				MyArrayBlockingQueue producerCopy = obj;
-
-				producerQueue.set(new MyArrayBlockingQueue(Capacity));
-
-				pool.execute(() -> {
-					try {
-						moveToFile(producerCopy);
-						filePointer.getAndIncrement();
-					} catch (IOException e1) {
-						e1.printStackTrace();
-					}
-				});
-			}
-			producerQueue.get().put(e);
-		} finally {
-			putLock.unlock();
+			// Will wait until consumer calls exchange
+			exchanger.exchange(nextConsumer) ;
+		} catch (Exception e) {
+			throw new RuntimeException(e) ;
 		}
 	}
 
-	// 4.Consumer consumes it from Consumer queue if any else consumes from producer
-	// queue
-	public Integer take() throws ClassNotFoundException, IOException {
-		MyArrayBlockingQueue consumer = consumerQueue.get();
-		MyArrayBlockingQueue producer = producerQueue.get();
-		while (consumerQueue.get().queueEmpty())
-			if (fileQueue.size() == 0) {
-				System.out.println("Consumes from producer");
-				return producer.take();
+	public void put(Integer e) {
+		if(producerRef.get().queueFull()) {
+			producerReplaceLock.lock() ;
+			try {
+				if(producerRef.get().queueFull()) {
+					MyArrayBlockingQueue producerCopy = producerRef.get();
+					producerRef.set(new MyArrayBlockingQueue(capacity));
+					pool.execute(() -> moveToFile(producerCopy));
+				}
+			} finally {
+				producerReplaceLock.unlock() ;
 			}
-		return consumer.take();
+		}
+
+		producerRef.get().put(e);
 	}
 
+	public Integer take() {
+		if (consumerRef.get().queueEmpty()) {
+			if(fileQueue.size() == 0) {
+				return producerRef.get().take() ;
+			}
+
+			consumerReplaceLock.lock() ;
+			try {
+				if(consumerRef.get().queueEmpty()) {
+					consumerRef.set(exchanger.exchange(consumerRef.get())) ;
+				}
+			} catch (Exception e) {
+				throw new RuntimeException(e);
+			} finally {
+				consumerReplaceLock.unlock();
+			}
+		}
+
+		return consumerRef.get().take();
+	}
 }
